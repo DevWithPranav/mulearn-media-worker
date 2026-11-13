@@ -1,111 +1,124 @@
 # mulearn-media-worker
 
-Cloudflare Worker that receives image uploads from the dashboard, checks the user,
-validates the image, resizes it, converts it to WebP, stores it in R2 and returns a **key**.
-The Django backend only stores that key and builds the public URL from it.
+A Cloudflare Worker that receives image uploads, checks the user, validates the image,
+resizes it, converts it to WebP, stores it in R2 and returns a **key**.
+The backend only stores that key and builds the public URL from it. It never handles image bytes.
 
-## Environments and URLs
+> All names, domains and values in this file are **examples**. Real values live in `wrangler.toml`,
+> your local `.env`, and your GitHub environments. Never put secrets in this file.
+
+## How it works
+1. The client sends `POST <worker-url>/upload` (multipart `file` and `module`) with
+   `Authorization: Bearer <access token>`.
+2. The worker checks the token (only access tokens are accepted), the body size, the module,
+   the file size and the real image type.
+3. The worker resizes the image (never upscales), converts it to WebP and writes
+   `<folder>/<uuid>.webp` to the R2 bucket.
+4. The worker answers `{ "key": "...", "url": "<public-url>/<key>", "size": 12345 }`.
+5. The client sends `{ "key": "..." }` to the backend endpoint that needs the image.
+6. The backend saves the key. When it returns the record, it builds the public URL from the key.
+
+## Environments
 | | dev | production |
 |---|---|---|
 | Git branch | `dev-server` | `production` |
-| Worker name | `mulearn-media-worker` | `mulearn-media-worker-prod` |
-| Upload endpoint | `https://mulearn-media-worker.devwithpranav.in/upload` | TODO (`WORKER_DOMAIN` in the `production` GitHub environment) |
-| R2 bucket | `mulearn-media` | `mulearn-media-prod` (TODO: create) |
-| Public images | `https://media.devwithpranav.in/<key>` | TODO |
+| Worker name | `<worker-name>` | `<worker-name>-prod` |
+| R2 bucket | `<dev-bucket>` | `<prod-bucket>` |
+| Upload URL | `https://<worker-domain>/upload` | `https://<prod-worker-domain>/upload` |
+| Public image URL | `https://<media-domain>/<key>` | `https://<prod-media-domain>/<key>` |
 
-The dev worker also answers at `https://mulearn-media-worker.pranavp92075.workers.dev/upload`.
-
-## Flow
-1. `POST /upload` (multipart `file`, `module`) with `Authorization: Bearer <access token>`
-2. Worker verifies the token (HS256 with `JWT_SECRET`; needs `id` and the backend's
-   `expiry` string, or a numeric `exp`), the module, size and real image type
-3. Worker resizes (no upscaling), converts to WebP, writes `<folder>/<uuid>.webp` to R2
-4. Response: `{ "key": "...", "url": "<public url>", "size": 12345 }`
-5. Frontend sends `{ "key": "..." }` to the backend endpoint it needs
+In `wrangler.toml`, the top level is dev and `[env.production]` is production.
+Wrangler does not copy `[vars]` or bindings into `[env.production]`, so shared values appear in both.
 
 ## Configuration
-| Name | Where it lives | Meaning |
-|---|---|---|
-| `WEBP_QUALITY` | `wrangler.toml` `[vars]` | WebP quality, 1-100 |
-| `CACHE_CONTROL` | `wrangler.toml` `[vars]` | Cache-Control header stored with each image |
-| `MEDIA_MODULES` | `wrangler.toml` `[vars]` | JSON: module -> `folder`, `maxBytes`, `maxDimension`. Folders must match the backend's `MEDIA_MODULES` |
-| `JWT_SECRET` | `.env` locally, GitHub secret in CI | Same as backend `SECRET_KEY` |
-| `ALLOWED_ORIGINS` | `.env` locally, GitHub variable in CI | Comma-separated browser origins allowed to call `/upload` |
-| `PUBLIC_BASE_URL` | `.env` locally, GitHub variable in CI | Public URL of the bucket (same as backend `R2_PUBLIC_BASE_URL`) |
-| `WORKER_DOMAIN` | `.env` locally, GitHub variable in CI | The worker's custom domain. Passed as `--domain` at deploy; not a secret and not read by the code |
+Nothing is hard-coded in the code. If a value is missing or invalid, the worker answers
+`500 server_misconfigured` and logs which setting is wrong (never its value).
 
-No URL or domain is written in the code or in `wrangler.toml`. Only names remain in `wrangler.toml`
-(worker name, bucket name), because Wrangler cannot take those from `.env` or the command line.
+| Name | Kind | Where it lives | Meaning |
+|---|---|---|---|
+| `WEBP_QUALITY` | setting | `wrangler.toml` `[vars]` | WebP quality, 1-100 |
+| `CACHE_CONTROL` | setting | `wrangler.toml` `[vars]` | Cache-Control header stored with each image |
+| `MEDIA_MODULES` | setting | `wrangler.toml` `[vars]` | JSON describing each upload module (see below) |
+| `JWT_SECRET` | **secret** | `.env` locally, GitHub secret in CI | Key that signs the access tokens (same as the backend) |
+| `ALLOWED_ORIGINS` | value | `.env` locally, GitHub variable in CI | Comma-separated browser origins allowed to call `/upload` |
+| `PUBLIC_BASE_URL` | value | `.env` locally, GitHub variable in CI | Public URL of the bucket (same as the backend's public URL setting) |
+| `WORKER_DOMAIN` | value | `.env` locally, GitHub variable in CI | Custom domain the worker is deployed to. Passed as `--domain`; not read by the code |
 
-`wrangler.toml` top level is **dev**; `[env.production]` is **production**. Wrangler does not
-copy `[vars]` or bindings into `[env.production]`, so change shared values in both places.
+`wrangler.toml` also holds the names Wrangler needs at deploy time: the worker name and the
+R2 bucket name. Wrangler cannot read those from `.env` or the command line.
 
-If any value is missing or invalid, the worker answers `500 server_misconfigured` and logs
-which setting is wrong.
+### MEDIA_MODULES format
+```json
+{
+  "<module_name>": {
+    "folder": "<r2/folder/path>",
+    "maxBytes": 5242880,
+    "maxDimension": 1024
+  }
+}
+```
+- `module_name`: what the client sends in the `module` field.
+- `folder`: where files go in the bucket. It must match the backend's module setting.
+- `maxBytes`: largest accepted upload.
+- `maxDimension`: images are scaled down to fit inside this width and height.
 
-A name must not be both a `[vars]` entry and a Worker secret. When moving a value from secrets
-to `wrangler.toml`, delete the secret first (`npx wrangler secret delete NAME --env ""`).
+To add a module, add an entry here (dev and production) and in the backend, then deploy.
 
-### Quoting values in .env
-Wrangler's `.env` parser:
-- Use **single quotes** for values with `#` or `"` (for example `JWT_SECRET='...'`).
-- A `$` is treated as a variable even inside single quotes; escape it as `\$`.
+### Local `.env`
+Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored.
+```
+JWT_SECRET='<same-secret-as-the-backend>'
+ALLOWED_ORIGINS=http://localhost:3000
+PUBLIC_BASE_URL=https://<media-domain>
+WORKER_DOMAIN=<worker-domain>
+```
+Quoting rules for `npm run dev` (Wrangler's `.env` parser):
+- Use single quotes for values that contain `#` or `"`. Without quotes, everything after `#` is dropped.
+- A `$` is read as a variable, even inside single quotes. Write it as `\$`.
 - A `"` inside a double-quoted value cuts the value short.
 
-These rules matter only for `npm run dev`. `npm run deploy` and CI upload secrets as JSON,
-so they are not affected.
-
-## CI/CD (GitHub Actions)
-`.github/workflows/deploy.yml`:
-- On every pull request into `dev-server` or `production`, it runs the typecheck and tests only.
-- On a push to `dev-server`, it runs the checks, then deploys the **dev** worker.
-- On a push to `production`, it runs the checks, then deploys the **production** worker.
-
-### One-time GitHub setup
-In the GitHub repo, open **Settings → Environments** and create two environments, `dev` and `production`.
-In each one, add:
-
-| Kind | Name | Value |
-|---|---|---|
-| Secret | `JWT_SECRET` | Backend `SECRET_KEY` for that environment |
-| Secret | `CLOUDFLARE_API_TOKEN` | Cloudflare API token ("Edit Cloudflare Workers" template; add R2 edit) |
-| Secret | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
-| Variable | `ALLOWED_ORIGINS` | Dashboard origin(s) for that environment |
-| Variable | `PUBLIC_BASE_URL` | Public bucket URL for that environment |
-| Variable | `WORKER_DOMAIN` | Worker custom domain for that environment (dev: `mulearn-media-worker.devwithpranav.in`) |
-
-`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` can be repository secrets instead, if both
-environments use the same Cloudflare account. Optionally, add required reviewers on the
-`production` environment so every production deploy needs an approval.
-
-### Before the first production deploy
-1. Create the production R2 bucket and connect its public custom domain.
-2. In `wrangler.toml` `[env.production]`, set the real `bucket_name`.
-3. Fill in the `production` GitHub environment values, including `WORKER_DOMAIN`.
-
-## Adding a module
-Add an entry to `MEDIA_MODULES` in `wrangler.toml` (both dev and production) and in the backend
-`.env` files, then deploy.
+`npm run deploy` and CI send secrets as JSON, so these rules do not apply there.
 
 ## Commands
 | Command | What it does |
 |---|---|
 | `npm install` | Install dependencies |
-| `npm run dev` | Run the dev config locally (reads `.env`, uses a simulated R2 bucket) |
-| `npm run deploy` | Deploy the **dev** worker from your machine (`scripts/deploy-dev.mjs`: uses `WORKER_DOMAIN` from `.env` and uploads the three secrets as JSON). Add `-- --dry-run` to test |
-| `npm run typecheck` / `npm test` | Checks |
+| `npm run dev` | Run locally with `.env`. R2 is simulated on your machine |
+| `npm run deploy` | Deploy the dev worker from your machine (`scripts/deploy-dev.mjs`). Add `-- --dry-run` to test without deploying |
+| `npm run typecheck` | Type check |
+| `npm test` | Unit tests |
 
-Production is deployed only by CI from the `production` branch.
-Needs Wrangler 4 (Wrangler 3 rejected every token in local dev).
+Production is deployed only by CI. Wrangler 4 and Node 22.12 or newer are required.
 
 ## Errors
-`401` bad or expired token, `400` bad module or missing field, `413` too large,
-`415` not a real image, `500` server misconfigured or storage error.
-Body: `{ "error": "...", "code": "..." }`.
+Body: `{ "error": "...", "code": "..." }`
+
+| Status | Code | Meaning |
+|---|---|---|
+| 400 | `bad_request`, `bad_module`, `empty_file` | Missing field, unknown module, or empty file |
+| 401 | `unauthorized` | Missing, invalid or expired token, or not an access token (refresh and signup tokens are refused) |
+| 411 | `length_required` | No `Content-Length` header |
+| 413 | `too_large` | Body bigger than the largest module allows (checked before reading it), or file over the module's `maxBytes` |
+| 415 | `unsupported_type`, `invalid_image` | Not a real JPEG, PNG, WebP or GIF, or the image could not be read |
+| 500 | `server_misconfigured`, `storage_error` | A setting is missing, or R2 failed |
+| 502 | `image_service_error` | Cloudflare Images failed; safe to retry |
+
+Images, R2 and config failures are logged with their error code (never secret values).
+
+## Troubleshooting
+- **401 on every request locally:** the secret in `.env` was cut short (see the quoting rules), or the
+  token was signed with a different secret.
+- **Uploaded images do not open locally:** `npm run dev` writes to a simulated bucket. Images only load
+  from the public URL after a real deploy.
+- **Deploy fails with Cloudflare error `10013`:** check the Cloudflare status page first, since
+  this error appeared during a Workers API incident. If a name exists as both a secret on the
+  worker and a `[vars]` entry, delete the secret (`npx wrangler secret delete <NAME>`).
+- **"Wrangler requires at least Node.js v22.12.0":** use Node 22 or newer (the workflow sets it).
+- **Custom domain is not attached after deploy:** confirm `WORKER_DOMAIN` is set and the token covers that zone.
 
 ## Notes
-- Local `npm run dev` writes to a simulated bucket, so returned URLs only load after deploy.
-- The database stores only keys, so changing the public domain changes every image URL at once;
-  update `PUBLIC_BASE_URL` (worker) and `R2_PUBLIC_BASE_URL` (backend) together.
-- Orphan images (uploaded but never attached, or replaced) are not deleted yet.
+- The database stores only keys, so changing the public domain changes every image URL at once. Update
+  `PUBLIC_BASE_URL` (worker) and the backend's public URL setting together.
+- Images that are replaced or never attached are not deleted yet.
 - Animated GIFs are stored as a single still frame.
+- The `workers.dev` address and preview URLs are turned off. Only the custom domain answers.

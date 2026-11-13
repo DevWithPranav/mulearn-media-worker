@@ -33,6 +33,21 @@ describe("verifyJwt", () => {
     expect(await verifyJwt(await sign({ id: "u1" }, "s3cret"), "s3cret")).toBeNull();
     expect(await verifyJwt(await sign({ exp: future }, "s3cret"), "s3cret")).toBeNull();
   });
+  it("accepts a token marked as an access token", async () => {
+    const tok = await sign({ id: "u1", expiry: djangoExpiry(Date.now() + 3600_000), tokenType: "access" }, "s3cret");
+    expect(await verifyJwt(tok, "s3cret")).not.toBeNull();
+  });
+  it("rejects refresh, signup and other non-access tokens", async () => {
+    for (const tokenType of ["refresh", "google_signup", "", "ACCESS"]) {
+      const tok = await sign({ id: "u1", expiry: djangoExpiry(Date.now() + 3600_000), tokenType }, "s3cret");
+      expect(await verifyJwt(tok, "s3cret"), tokenType).toBeNull();
+    }
+  });
+  it("works again after the secret changes (key cache)", async () => {
+    expect(await verifyJwt(await sign({ id: "u1", exp: future }, "a"), "a")).not.toBeNull();
+    expect(await verifyJwt(await sign({ id: "u1", exp: future }, "b"), "b")).not.toBeNull();
+    expect(await verifyJwt(await sign({ id: "u1", exp: future }, "a"), "b")).toBeNull();
+  });
   it("rejects wrong secret", async () => {
     expect(await verifyJwt(await sign({ id: "u1", exp: future }, "s3cret"), "other")).toBeNull();
   });

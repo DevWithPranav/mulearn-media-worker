@@ -13,6 +13,7 @@ export interface JwtPayload {
   id?: string;
   exp?: number;
   expiry?: string;
+  tokenType?: string;
   [k: string]: unknown;
 }
 
@@ -32,7 +33,35 @@ function expiryMs(p: JwtPayload): number | null {
   return null;
 }
 
-/** Returns the payload if signature and expiry are valid, otherwise null. */
+// The secret is fixed for the life of the isolate, so import the HMAC key once
+// and reuse it. Re-imported only if the secret changes.
+let cachedKey: { secret: string; key: Promise<CryptoKey> } | null = null;
+
+function hmacKey(secret: string): Promise<CryptoKey> {
+  if (!cachedKey || cachedKey.secret !== secret) {
+    const key = crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"],
+    );
+    // Do not keep a failed import around.
+    key.catch(() => {
+      if (cachedKey?.key === key) cachedKey = null;
+    });
+    cachedKey = { secret, key };
+  }
+  return cachedKey.key;
+}
+
+/**
+ * Returns the payload if this is a valid, unexpired **access** token, otherwise null.
+ *
+ * The backend signs several token kinds with the same secret (refresh tokens,
+ * signup tokens, ...). They carry a "tokenType"; only "access" may upload.
+ * A token without "tokenType" is treated as an access token, as the backend does.
+ */
 export async function verifyJwt(token: string, secret: string): Promise<JwtPayload | null> {
   const parts = token.split(".");
   if (parts.length !== 3 || !secret) return null;
@@ -41,22 +70,16 @@ export async function verifyJwt(token: string, secret: string): Promise<JwtPaylo
     const header = JSON.parse(new TextDecoder().decode(b64urlToBytes(h)));
     if (header.alg !== "HS256") return null;
 
-    const key = await crypto.subtle.importKey(
-      "raw",
-      new TextEncoder().encode(secret),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["verify"],
-    );
     const ok = await crypto.subtle.verify(
       "HMAC",
-      key,
+      await hmacKey(secret),
       b64urlToBytes(s),
       new TextEncoder().encode(`${h}.${p}`),
     );
     if (!ok) return null;
 
     const payload = JSON.parse(new TextDecoder().decode(b64urlToBytes(p))) as JwtPayload;
+    if (payload.tokenType !== undefined && payload.tokenType !== "access") return null;
     const exp = expiryMs(payload);
     if (exp === null || exp < Date.now()) return null;
     // The backend also requires a user id in the token.

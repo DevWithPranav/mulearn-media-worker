@@ -1,6 +1,6 @@
 // All runtime settings come from the environment. Shared, non-secret values are
 // [vars] in wrangler.toml; per-environment values (JWT_SECRET, ALLOWED_ORIGINS,
-// PUBLIC_BASE_URL) come from .env locally and from GitHub secrets/variables in CI.
+// PUBLIC_BASE_URL) come from .env locally and from the deploy environment.
 // Nothing here has a built-in default: a missing or invalid value is a
 // configuration error.
 
@@ -17,6 +17,8 @@ export interface Config {
   webpQuality: number;
   cacheControl: string;
   modules: Record<string, ModuleRule>;
+  /** Largest maxBytes of any module; used to reject huge bodies before reading them. */
+  maxFileBytes: number;
 }
 
 export type RawEnv = Record<string, unknown>;
@@ -70,13 +72,33 @@ function parseModules(env: RawEnv): Record<string, ModuleRule> {
   return out;
 }
 
+/** ALLOWED_ORIGINS on its own, so CORS still works when another setting is broken. */
+export function parseOrigins(env: RawEnv): string[] {
+  return str(env, "ALLOWED_ORIGINS").split(",").map((s) => s.trim()).filter(Boolean);
+}
+
 export function loadConfig(env: RawEnv): Config {
+  const modules = parseModules(env);
   return {
     jwtSecret: str(env, "JWT_SECRET"),
-    allowedOrigins: str(env, "ALLOWED_ORIGINS").split(",").map((s) => s.trim()).filter(Boolean),
+    allowedOrigins: parseOrigins(env),
     publicBaseUrl: str(env, "PUBLIC_BASE_URL").replace(/\/+$/, ""),
     webpQuality: int(env, "WEBP_QUALITY", 1, 100),
     cacheControl: str(env, "CACHE_CONTROL"),
-    modules: parseModules(env),
+    modules,
+    maxFileBytes: Math.max(...Object.values(modules).map((m) => m.maxBytes)),
   };
+}
+
+// env is fixed for the life of the isolate, so parse it once per env object.
+// Only successful parses are cached; a broken config is re-checked each time.
+const cache = new WeakMap<object, Config>();
+
+export function getConfig(env: RawEnv): Config {
+  let cfg = cache.get(env);
+  if (!cfg) {
+    cfg = loadConfig(env);
+    cache.set(env, cfg);
+  }
+  return cfg;
 }

@@ -10,7 +10,8 @@ The backend only stores that key and builds the public URL from it. It never han
 ## How it works
 1. The client sends `POST <worker-url>/upload` (multipart `file` and `module`) with
    `Authorization: Bearer <access token>`.
-2. The worker checks the token, the module, the file size and the real image type.
+2. The worker checks the token (only access tokens are accepted), the body size, the module,
+   the file size and the real image type.
 3. The worker resizes the image (never upscales), converts it to WebP and writes
    `<folder>/<uuid>.webp` to the R2 bucket.
 4. The worker answers `{ "key": "...", "url": "<public-url>/<key>", "size": 12345 }`.
@@ -95,10 +96,14 @@ Body: `{ "error": "...", "code": "..." }`
 | Status | Code | Meaning |
 |---|---|---|
 | 400 | `bad_request`, `bad_module`, `empty_file` | Missing field, unknown module, or empty file |
-| 401 | `unauthorized` | Missing, invalid or expired token |
-| 413 | `too_large` | File over the module's `maxBytes` |
-| 415 | `unsupported_type`, `invalid_image` | Not a real JPEG, PNG, WebP or GIF, or could not be processed |
+| 401 | `unauthorized` | Missing, invalid or expired token, or not an access token (refresh and signup tokens are refused) |
+| 411 | `length_required` | No `Content-Length` header |
+| 413 | `too_large` | Body bigger than the largest module allows (checked before reading it), or file over the module's `maxBytes` |
+| 415 | `unsupported_type`, `invalid_image` | Not a real JPEG, PNG, WebP or GIF, or the image could not be read |
 | 500 | `server_misconfigured`, `storage_error` | A setting is missing, or R2 failed |
+| 502 | `image_service_error` | Cloudflare Images failed; safe to retry |
+
+Images, R2 and config failures are logged with their error code (never secret values).
 
 ## Troubleshooting
 - **401 on every request locally:** the secret in `.env` was cut short (see the quoting rules), or the

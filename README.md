@@ -78,39 +78,6 @@ Quoting rules for `npm run dev` (Wrangler's `.env` parser):
 
 `npm run deploy` and CI send secrets as JSON, so these rules do not apply there.
 
-## CI/CD (GitHub Actions)
-`.github/workflows/deploy.yml`:
-- Pull request into `dev-server` or `production`: typecheck and tests only.
-- Push to `dev-server`: checks, then deploy the **dev** worker.
-- Push to `production`: checks, then deploy the **production** worker.
-
-Each push updates the same worker (a new version of it). It does not create a new worker.
-
-### One-time setup
-1. **Cloudflare API token.** In Cloudflare, go to My Profile, then API Tokens, and create a token from the
-   "Edit Cloudflare Workers" template. Add **Workers R2 Storage: Edit**, and include the zone that
-   holds the worker domain (Workers Routes: Edit). If attaching the domain fails with a permission
-   error, add Zone DNS: Edit for that zone.
-2. **GitHub environments.** In the repo, open Settings, then Environments, and create `dev` and `production`.
-   Add these to each:
-
-| Kind | Name | Value |
-|---|---|---|
-| Secret | `JWT_SECRET` | Signing secret of the matching backend |
-| Secret | `CLOUDFLARE_API_TOKEN` | Token from step 1 |
-| Secret | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
-| Variable | `ALLOWED_ORIGINS` | Origins of that environment's frontend |
-| Variable | `PUBLIC_BASE_URL` | Public bucket URL of that environment |
-| Variable | `WORKER_DOMAIN` | Worker domain of that environment |
-
-   Optionally add required reviewers to `production`, so each production deploy needs an approval.
-3. **Branches.** Create `dev-server` and `production`.
-
-### Before the first production deploy
-1. Create the production R2 bucket and connect its public custom domain.
-2. Set `bucket_name` in `[env.production]` in `wrangler.toml`.
-3. Fill in the `production` GitHub environment, including `WORKER_DOMAIN`.
-
 ## Commands
 | Command | What it does |
 |---|---|
